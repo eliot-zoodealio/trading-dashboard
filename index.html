@@ -29,4 +29,131 @@
     .neg { color: #f85149; font-weight: 600; }
     .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
     .badge-stock { background: #1f3a5f; color: #79c0ff; }
-    .badge-crypto { background: #3d2b00; color: #e3
+    .badge-crypto { background: #3d2b00; color: #e3b341; }
+    #status { font-size: 0.8rem; color: #8b949e; margin-bottom: 20px; }
+    #status.error { color: #f85149; }
+  </style>
+</head>
+<body>
+  <h1>📈 Trading Dashboard</h1>
+  <div class="subtitle">Robinhood trades — live from Google Sheets</div>
+  <div id="status">Loading data...</div>
+  <div class="kpi-grid" id="kpis"></div>
+  <div class="charts-grid">
+    <div class="card"><h2>P&L by Trade</h2><div class="chart-wrap"><canvas id="plChart"></canvas></div></div>
+    <div class="card"><h2>Return % by Asset</h2><div class="chart-wrap"><canvas id="returnChart"></canvas></div></div>
+    <div class="card"><h2>Capital Deployed by Asset</h2><div class="chart-wrap"><canvas id="capitalChart"></canvas></div></div>
+    <div class="card"><h2>Stocks vs Crypto Split</h2><div class="chart-wrap"><canvas id="splitChart"></canvas></div></div>
+  </div>
+  <div class="card">
+    <h2>All Trades</h2>
+    <table>
+            <thead><tr><th>Date</th><th>Asset</th><th>Type</th><th>Shares</th><th>Buy</th><th>Sell</th><th>Capital Out</th><th>Fees</th><th>Profit / Loss</th><th>Return %</th></tr></thead>
+      <tbody id="tradeTable"></tbody>
+    </table>
+  </div>
+  <script>
+    const SHEET_ID = '1QZArOJS0a1l54F9TlhcXK5hRBD8JO4HhSeohYBYsvPw';
+    const SHEET_NAME = 'April';
+    const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(SHEET_NAME)}`;
+    const CRYPTO = new Set(['BTC','ETH','SOL','XRP','DOGE','ABTC','ADA','AVAX','MATIC','LTC','LINK']);
+
+    function parseCSV(text) {
+      return text.trim().split('\n').map(row => {
+        const cols = []; let cur = '', inQuote = false;
+        for (let i = 0; i < row.length; i++) {
+          const c = row[i];
+          if (c === '"') { inQuote = !inQuote; }
+          else if (c === ',' && !inQuote) { cols.push(cur.trim()); cur = ''; }
+          else { cur += c; }
+        }
+        cols.push(cur.trim()); return cols;
+      });
+    }
+
+    function parseMoney(s) { if (!s) return 0; return parseFloat(s.replace(/[$,%]/g, '').replace(/,/g, '')) || 0; }
+    function fmt(n) { return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+    function fmtPct(n) { return n.toFixed(2) + '%'; }
+
+    async function loadData() {
+      const statusEl = document.getElementById('status');
+      try {
+        const res = await fetch(CSV_URL);
+        if (!res.ok) throw new Error('Failed to fetch sheet');
+        const text = await res.text();
+        const rows = parseCSV(text);
+        const trades = rows.slice(1).filter(r => r[0] && r[1] && r[1].trim() !== '');
+        if (trades.length === 0) throw new Error('No trade data found');
+        const data = trades.map(r => ({
+          date: r[0], asset: r[1], shares: parseMoney(r[2]), buy: parseMoney(r[3]),
+          sell: parseMoney(r[4]), fees: parseMoney(r[5]), moneyOut: parseMoney(r[6]),
+          pl: parseMoney(r[7]), plPct: parseMoney(r[8]), type: CRYPTO.has(r[1]) ? 'Crypto' : 'Stock'
+        }));
+        statusEl.textContent = `Last updated: ${new Date().toLocaleString()} · ${data.length} trades loaded`;
+        renderKPIs(data); renderTable(data); renderCharts(data);
+      } catch (e) { statusEl.className = 'error'; statusEl.textContent = 'Error loading data: ' + e.message; }
+    }
+
+    function renderKPIs(data) {
+      const totalCapital = data.reduce((s, t) => s + t.moneyOut, 0);
+      const totalPL = data.reduce((s, t) => s + t.pl, 0);
+      const totalFees = data.reduce((s, t) => s + t.fees, 0);
+      const overallPct = totalCapital > 0 ? (totalPL / totalCapital) * 100 : 0;
+      const bestTrade = data.reduce((a, b) => b.plPct > a.plPct ? b : a);
+      const kpis = [
+        { label: 'Total Capital Deployed', value: fmt(totalCapital), cls: '' },
+        { label: 'Total Profit / Loss', value: fmt(totalPL), cls: totalPL >= 0 ? 'green' : 'red' },
+        { label: 'Overall Return', value: fmtPct(overallPct), cls: overallPct >= 0 ? 'green' : 'red' },
+        { label: 'Total Fees', value: fmt(totalFees), cls: '' },
+        { label: 'Number of Trades', value: data.length, cls: '' },
+        { label: 'Best Trade', value: `${bestTrade.asset} +${fmtPct(bestTrade.plPct)}`, cls: 'green' },
+      ];
+      document.getElementById('kpis').innerHTML = kpis.map(k => `<div class="kpi"><div class="kpi-label">${k.label}</div><div class="kpi-value ${k.cls}">${k.value}</div></div>`).join('');
+    }
+
+    function renderTable(data) {
+      document.getElementById('tradeTable').innerHTML = data.map(t => `
+        <tr><td>${t.date}</td><td><strong>${t.asset}</strong></td>
+        <td><span class="badge ${t.type === 'Crypto' ? 'badge-crypto' : 'badge-stock'}">${t.type}</span></td>
+        <td>${t.shares}</td><td>${fmt(t.buy)}</td><td>${fmt(t.sell)}</td><td>${fmt(t.moneyOut)}</td>
+        <td>${fmt(t.fees)}</td><td class="${t.pl >= 0 ? 'pos' : 'neg'}">${fmt(t.pl)}</td>
+        <td class="${t.plPct >= 0 ? 'pos' : 'neg'}">${fmtPct(t.plPct)}</td></tr>`).join('');
+    }
+
+    function renderCharts(data) {
+      const colors = ['#58a6ff','#3fb950','#e3b341','#f85149','#bc8cff','#79c0ff','#56d364','#ffa657','#ff7b72','#d2a8ff'];
+      new Chart(document.getElementById('plChart'), {
+        type: 'bar',
+        data: { labels: data.map(t => `${t.asset} ${t.date}`), datasets: [{ data: data.map(t => t.pl), backgroundColor: data.map(t => t.pl >= 0 ? '#3fb950' : '#f85149'), borderRadius: 4 }] },
+        options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b949e', font: { size: 10 } }, grid: { color: '#21262d' } }, y: { ticks: { color: '#8b949e', callback: v => '$' + v }, grid: { color: '#21262d' } } } }
+      });
+      const assetMap = {};
+      data.forEach(t => { if (!assetMap[t.asset]) assetMap[t.asset] = { total: 0, count: 0 }; assetMap[t.asset].total += t.plPct; assetMap[t.asset].count++; });
+      const assets = Object.keys(assetMap).sort((a, b) => (assetMap[b].total / assetMap[b].count) - (assetMap[a].total / assetMap[a].count));
+      const avgReturns = assets.map(a => +(assetMap[a].total / assetMap[a].count).toFixed(2));
+      new Chart(document.getElementById('returnChart'), {
+        type: 'bar',
+        data: { labels: assets, datasets: [{ data: avgReturns, backgroundColor: avgReturns.map(v => v >= 0 ? '#58a6ff' : '#f85149'), borderRadius: 4 }] },
+        options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } }, y: { ticks: { color: '#8b949e', callback: v => v + '%' }, grid: { color: '#21262d' } } } }
+      });
+      const capitalMap = {};
+      data.forEach(t => { capitalMap[t.asset] = (capitalMap[t.asset] || 0) + t.moneyOut; });
+      const capAssets = Object.keys(capitalMap).sort((a, b) => capitalMap[b] - capitalMap[a]);
+      new Chart(document.getElementById('capitalChart'), {
+        type: 'bar',
+        data: { labels: capAssets, datasets: [{ data: capAssets.map(a => capitalMap[a]), backgroundColor: colors, borderRadius: 4 }] },
+        options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b949e' }, grid: { color: '#21262d' } }, y: { ticks: { color: '#8b949e', callback: v => '$' + v.toLocaleString() }, grid: { color: '#21262d' } } } }
+      });
+      const stockCap = data.filter(t => t.type === 'Stock').reduce((s, t) => s + t.moneyOut, 0);
+      const cryptoCap = data.filter(t => t.type === 'Crypto').reduce((s, t) => s + t.moneyOut, 0);
+      new Chart(document.getElementById('splitChart'), {
+        type: 'doughnut',
+        data: { labels: ['Stocks', 'Crypto'], datasets: [{ data: [stockCap, cryptoCap], backgroundColor: ['#58a6ff', '#e3b341'], borderWidth: 0 }] },
+        options: { plugins: { legend: { labels: { color: '#e6edf3', font: { size: 13 } } }, tooltip: { callbacks: { label: ctx => ` ${fmt(ctx.raw)}` } } } }
+      });
+    }
+
+    loadData();
+  </script>
+</body>
+</html>
